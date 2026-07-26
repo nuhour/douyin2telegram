@@ -6,13 +6,13 @@
 
 **Architecture:** 本机 Mac 上的单个 Python 项目，launchd 每小时唤起 `main.py` 执行一个"同步 tick"：f2 拉喜欢列表增量入库 SQLite → 按点赞正序取 pending 批次 → 逐条 `fetch_one_video` 取新鲜地址 → httpx 流式下载 → Telethon(MTProto) 上传频道 → 更新状态。Cookie 失效时冷却 6 小时并私聊告警。
 
-**Tech Stack:** Python 3.12、f2（抖音接口+签名）、Telethon（Bot Token 走 MTProto，上传上限 2GB）、hachoir（Telethon 自动提取视频元数据）、PyYAML、httpx、SQLite（标准库 sqlite3）、pytest。
+**Tech Stack:** Python 3.10+（本机为 3.10.19）、f2（抖音接口+签名）、Telethon（Bot Token 走 MTProto，上传上限 2GB）、hachoir（Telethon 自动提取视频元数据）、PyYAML、httpx、SQLite（标准库 sqlite3）、pytest。
 
 **Spec:** `docs/superpowers/specs/2026-07-26-douyin2telegram-design.md`
 
 ## Global Constraints
 
-- Python 3.12；依赖管理用 venv + pip + requirements.txt（用户明确要求 pip）
+- Python 3.10+（本机为 3.10.19，f2 最低要求 3.10）；依赖管理用 venv + pip + requirements.txt（用户明确要求 pip）
 - `config.yaml`、`data/`（含 state.db、*.session、临时文件、日志）绝不入 git
 - 限速默认值：单 tick 处理 20 条；每条间隔随机 5~15 秒；Cookie 失效冷却 6 小时
 - 发送顺序：按点赞时间正序（旧→新）
