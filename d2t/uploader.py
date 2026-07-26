@@ -16,7 +16,10 @@ def build_caption(work: Work) -> str:
     title = work.title
     budget = CAPTION_LIMIT - len(tail)
     if len(title) > budget:
-        title = title[: budget - 1] + "…"
+        if budget > 0:
+            title = title[: budget - 1] + "…"
+        else:
+            title = ""
     return f"{title}{tail}"
 
 
