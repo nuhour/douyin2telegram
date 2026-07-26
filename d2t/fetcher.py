@@ -70,7 +70,7 @@ class DouyinFetcher:
                 raise DouyinAuthError("喜欢列表首页为空，Cookie 可能已失效或触发风控")
             first_page = False
             if not records:
-                return
+                continue
             yield [_normalize(r) for r in records]
 
     async def fetch_detail(self, aweme_id: str) -> dict:
