@@ -1,0 +1,22 @@
+douyin:
+  # 浏览器登录 www.douyin.com 后，从开发者工具复制完整 Cookie
+  cookie: "PASTE_YOUR_COOKIE_HERE"
+  # 你自己的抖音主页链接
+  profile_url: "https://www.douyin.com/user/MS4wLjABAAAAxxxxxxxx"
+
+telegram:
+  # https://my.telegram.org -> API development tools 申请
+  api_id: 123456
+  api_hash: "your_api_hash"
+  # @BotFather 创建 Bot 获得
+  bot_token: "123456:ABC-xxxx"
+  # 频道 @用户名，或 -100 开头的频道数字 ID（Bot 须为频道管理员）
+  channel: "@your_channel"
+  # 你自己的用户 chat_id（先给 Bot 发一次 /start；可用 @userinfobot 查询自己的 ID）
+  alert_chat_id: 123456789
+
+sync:
+  batch_size: 20        # 单次 tick 最多处理条数
+  sleep_min: 5          # 每条之间最小间隔（秒）
+  sleep_max: 15         # 每条之间最大间隔（秒）
+  cooldown_hours: 6     # Cookie 失效后的冷却时长（小时）
