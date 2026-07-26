@@ -45,6 +45,13 @@ def extract_media(detail: dict) -> Media:
 async def download_media(
     media: Media, aweme_id: str, tmp_dir: Path, headers: dict, client=None
 ) -> list[Path]:
+    """
+    流式下载媒体文件。
+
+    - 视频保存为 {aweme_id}.mp4
+    - 图片保存为 {aweme_id}_{i}.jpg
+    - 失败时不遗留部分文件
+    """
     tmp_dir.mkdir(parents=True, exist_ok=True)
     own_client = client is None
     client = client or httpx.AsyncClient(
@@ -52,18 +59,25 @@ async def download_media(
     )
     files = []
     try:
-        for i, url in enumerate(media.urls):
-            if media.kind == "video":
-                path = tmp_dir / f"{aweme_id}.mp4"
-            else:
-                path = tmp_dir / f"{aweme_id}_{i}.jpg"
-            async with client.stream("GET", url) as resp:
-                resp.raise_for_status()
-                with path.open("wb") as fh:
-                    async for chunk in resp.aiter_bytes(1024 * 256):
-                        fh.write(chunk)
-            files.append(path)
-        return files
+        try:
+            for i, url in enumerate(media.urls):
+                if media.kind == "video":
+                    path = tmp_dir / f"{aweme_id}.mp4"
+                else:
+                    path = tmp_dir / f"{aweme_id}_{i}.jpg"
+                async with client.stream("GET", url) as resp:
+                    resp.raise_for_status()
+                    with path.open("wb") as fh:
+                        async for chunk in resp.aiter_bytes(1024 * 256):
+                            fh.write(chunk)
+                files.append(path)
+            return files
+        except Exception:
+            # 失败时删除所有已创建的文件
+            for path in files:
+                if path.exists():
+                    path.unlink()
+            raise
     finally:
         if own_client:
             await client.aclose()

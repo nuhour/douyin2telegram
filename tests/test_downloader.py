@@ -49,3 +49,22 @@ def test_download_images(tmp_path):
     media = Media(kind="images", urls=["http://i/1.jpg", "http://i/2.jpg"])
     files = asyncio.run(download_media(media, "222", tmp_path, {}, client=_mock_client()))
     assert [f.name for f in files] == ["222_0.jpg", "222_1.jpg"]
+
+
+def test_download_cleanup_on_failure(tmp_path):
+    import pytest
+
+    def respond(request):
+        if request.url.path == "/1.jpg":
+            return httpx.Response(200, content=b"IMAGE1-DATA")
+        else:
+            return httpx.Response(404, content=b"Not Found")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+    media = Media(kind="images", urls=["http://i/1.jpg", "http://i/2.jpg"])
+
+    with pytest.raises(httpx.HTTPStatusError):
+        asyncio.run(download_media(media, "333", tmp_path, {}, client=client))
+
+    # 断言目录下没有遗留任何文件（第一张已下载的也被清掉）
+    assert list(tmp_path.iterdir()) == []
