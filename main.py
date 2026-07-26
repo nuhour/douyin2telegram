@@ -37,7 +37,10 @@ async def run_tick(cfg, state, fetcher, uploader, notifier, tmp_dir: Path,
         print(f"新增 {added} 条待同步作品")
     except Exception as e:  # Cookie 失效/风控/接口变动都走同一冷却路径
         state.set_cooldown(time.time() + cfg.sync.cooldown_hours * 3600)
-        await notifier.alert(cookie_invalid_text(str(e)))
+        try:
+            await notifier.alert(cookie_invalid_text(str(e)))
+        except Exception as alert_err:  # 告警本身失败不应影响冷却已生效的事实
+            print(f"告警发送失败: {alert_err}", file=sys.stderr)
         return
 
     # 阶段二：处理待同步队列（点赞正序）
@@ -48,7 +51,7 @@ async def run_tick(cfg, state, fetcher, uploader, notifier, tmp_dir: Path,
             detail = await fetcher.fetch_detail(work.aweme_id)
             media = extract_media(detail)
             files = await download_fn(media, work.aweme_id, tmp_dir, fetcher.http_headers)
-            await uploader.upload_work(work, files)
+            await uploader.upload_work(work, files, media.kind)
             state.mark_uploaded(work.aweme_id)
             print(f"已同步 {work.aweme_id}")
         except OversizeError as e:
@@ -58,7 +61,15 @@ async def run_tick(cfg, state, fetcher, uploader, notifier, tmp_dir: Path,
             status = state.mark_failed(work.aweme_id, str(e))
             print(f"处理失败 {work.aweme_id}: {e}", file=sys.stderr)
             if status == "failed":
-                await notifier.alert(work_failed_text(work, str(e)))
+                try:
+                    await notifier.alert(work_failed_text(work, str(e)))
+                except Exception as alert_err:  # 告警失败不应中断批次
+                    print(f"告警发送失败: {alert_err}", file=sys.stderr)
+                try:
+                    # 多次重试仍失败，降级为链接卡片，避免作品彻底丢失
+                    await uploader.send_link_card(work, "多次尝试后失败，降级为链接")
+                except Exception as card_err:
+                    print(f"降级链接卡片发送失败: {card_err}", file=sys.stderr)
         finally:
             for f in files:
                 f.unlink(missing_ok=True)

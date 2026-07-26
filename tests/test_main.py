@@ -22,8 +22,11 @@ def _rec(aweme_id):
 
 
 class FakeFetcher:
-    def __init__(self, pages=None, fail_fetch=False, fail_detail=False):
+    def __init__(self, pages=None, fail_fetch=False, fail_detail=False,
+                 fail_detail_ids=None, detail_overrides=None):
         self.pages, self.fail_fetch, self.fail_detail = pages or [], fail_fetch, fail_detail
+        self.fail_detail_ids = fail_detail_ids or set()
+        self.detail_overrides = detail_overrides or {}
         self.http_headers = {}
 
     async def resolve_sec_user_id(self):
@@ -36,20 +39,23 @@ class FakeFetcher:
             yield p
 
     async def fetch_detail(self, aweme_id):
-        if self.fail_detail:
+        if self.fail_detail or aweme_id in self.fail_detail_ids:
             raise RuntimeError("视频已删除")
+        if aweme_id in self.detail_overrides:
+            return self.detail_overrides[aweme_id]
         return {"video_play_addr": f"http://v/{aweme_id}.mp4", "images": None}
 
 
 class FakeUploader:
     def __init__(self, oversize=False):
         self.oversize = oversize
-        self.uploaded, self.link_cards, self.messages = [], [], []
+        self.uploaded, self.link_cards, self.messages, self.kinds = [], [], [], []
 
-    async def upload_work(self, work, files):
+    async def upload_work(self, work, files, kind):
         if self.oversize:
             raise OversizeError("太大")
         self.uploaded.append(work.aweme_id)
+        self.kinds.append((work.aweme_id, kind))
 
     async def send_link_card(self, work, reason):
         self.link_cards.append(work.aweme_id)
@@ -59,11 +65,14 @@ class FakeUploader:
 
 
 class FakeNotifier:
-    def __init__(self):
+    def __init__(self, fail_alert=False):
         self.alerts = []
+        self.fail_alert = fail_alert
 
     async def alert(self, text):
         self.alerts.append(text)
+        if self.fail_alert:
+            raise RuntimeError("Telethon 解析 entity 失败")
 
 
 async def _noop_sleep(_):
@@ -77,13 +86,13 @@ async def _fake_download(media, aweme_id, tmp_dir, headers, client=None):
     return [path]
 
 
-def _run(state, fetcher, uploader, tmp_path, limit=None):
-    notifier = FakeNotifier()
+def _run(state, fetcher, uploader, tmp_path, limit=None, notifier=None, download_fn=_fake_download):
+    notifier = notifier or FakeNotifier()
     asyncio.run(
         run_tick(
             _cfg(), state, fetcher, uploader, notifier,
             tmp_dir=tmp_path / "tmp", sleep_fn=_noop_sleep,
-            download_fn=_fake_download, limit=limit,
+            download_fn=download_fn, limit=limit,
         )
     )
     return notifier
@@ -130,9 +139,11 @@ def test_detail_failure_retries_then_failed(tmp_path):
     assert state.next_batch(10)[0].retries == 1  # 第 1 次失败仍 pending
     fetcher.pages = []
     _run(state, fetcher, FakeUploader(), tmp_path)
-    notifier = _run(state, fetcher, FakeUploader(), tmp_path)
+    uploader = FakeUploader()
+    notifier = _run(state, fetcher, uploader, tmp_path)
     assert state.next_batch(10) == []  # 3 次后 failed
     assert any("重试 3 次" in t for t in notifier.alerts)
+    assert uploader.link_cards == ["1"]  # F5：多次失败后降级为链接卡片，不彻底丢失
 
 
 def test_limit(tmp_path):
@@ -150,3 +161,52 @@ def test_limit_zero_processes_nothing(tmp_path):
          tmp_path, limit=0)
     assert uploader.uploaded == []
     assert len(state.next_batch(10)) == 3  # 队列保持不动，全部仍 pending
+
+
+def test_images_detail_routes_as_album(tmp_path):
+    """work.aweme_type（列表页判型）为 video，但详情页实际是图集时，
+    上传分支必须按详情页的 media.kind 走，不能被列表页的旧判型带偏。"""
+    state = State(tmp_path / "s.db")
+    fetcher = FakeFetcher(
+        pages=[[_rec("1")]],
+        detail_overrides={"1": {"video_play_addr": None, "images": ["http://i/1.jpg"]}},
+    )
+    uploader = FakeUploader()
+
+    async def fake_download_images(media, aweme_id, tmp_dir, headers, client=None):
+        path = Path(tmp_dir) / f"{aweme_id}_0.jpg"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"x")
+        return [path]
+
+    _run(state, fetcher, uploader, tmp_path, download_fn=fake_download_images)
+    assert uploader.kinds == [("1", "images")]
+    assert uploader.uploaded == ["1"]
+
+
+def test_alert_failure_during_cooldown_does_not_crash(tmp_path):
+    """冷却告警若因 Telethon 解析 entity 失败而抛异常，不应中断 run_tick，
+    且冷却状态应已经写入（写库先于告警发送）。"""
+    state = State(tmp_path / "s.db")
+    notifier = FakeNotifier(fail_alert=True)
+    _run(state, FakeFetcher(fail_fetch=True), FakeUploader(), tmp_path, notifier=notifier)
+    assert state.in_cooldown()
+    assert notifier.alerts  # 确实尝试过发送
+
+
+def test_failed_alert_failure_continues_batch(tmp_path):
+    """failed 告警发送失败时，批次内其余作品应继续处理，且失败作品仍降级为链接卡片。"""
+    state = State(tmp_path / "s.db")
+    state.add_works([_rec("2"), _rec("1")])  # "1" 更旧，sort_key 更小，先处理
+    state.mark_failed("1", "boom")
+    state.mark_failed("1", "boom")  # retries=2，本次将是第 3 次，转 failed
+
+    fetcher = FakeFetcher(pages=[], fail_detail_ids={"1"})
+    uploader = FakeUploader()
+    notifier = FakeNotifier(fail_alert=True)
+
+    _run(state, fetcher, uploader, tmp_path, notifier=notifier)
+
+    assert state.next_batch(10) == []  # 两条都已终态处理完
+    assert uploader.uploaded == ["2"]  # 批次继续处理到了第二条
+    assert uploader.link_cards == ["1"]  # F5：失败降级为链接卡片

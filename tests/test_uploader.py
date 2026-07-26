@@ -1,5 +1,5 @@
 from d2t.models import Work
-from d2t.uploader import build_caption, chunk10
+from d2t.uploader import _tg_len, build_caption, chunk10
 
 
 def _work(title):
@@ -53,3 +53,12 @@ def test_caption_tail_exactly_1024():
     assert len(tail) == 1024  # tail 也应该正好是 1024
     assert cap == tail  # caption 应该等于 tail（无标题）
     assert "很长的标题" not in cap  # 标题应被完全移除
+
+
+def test_caption_utf16_emoji():
+    """emoji 在 UTF-16 中占 2 个 code unit，len() 会低估真实长度，
+    必须按 _tg_len 计数截断才能保证不超过 Telegram 的 1024 上限。"""
+    w = Work(aweme_id="123", aweme_type="video", title="🔥" * 600, author="张三")
+    cap = build_caption(w)
+    assert _tg_len(cap) <= 1024
+    assert cap.endswith("🔗 https://www.douyin.com/video/123")

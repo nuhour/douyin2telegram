@@ -6,3 +6,4 @@ data/
 *.session
 *.session-journal
 .pytest_cache/
+logs/
