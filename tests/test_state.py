@@ -58,3 +58,15 @@ def test_cooldown(tmp_path):
     assert st.in_cooldown()
     st.set_cooldown(time.time() - 1)
     assert not st.in_cooldown()
+
+
+def test_intra_batch_duplicate(tmp_path):
+    st = make_state(tmp_path)
+    # 批次中同一作品重复出现（如分页漂移）：[3, 2, 2, 1]（新→旧）
+    assert st.add_works([_rec("3"), _rec("2"), _rec("2"), _rec("1")]) == 3  # 只入库 3 条
+    batch = st.next_batch(10)
+    assert [w.aweme_id for w in batch] == ["1", "2", "3"]  # 顺序正确
+    # 验证 sort_key 不留空洞：再入库一条作品后应该排在最后
+    assert st.add_works([_rec("4")]) == 1
+    batch = st.next_batch(10)
+    assert [w.aweme_id for w in batch] == ["1", "2", "3", "4"]

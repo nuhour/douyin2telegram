@@ -34,7 +34,16 @@ class State:
         self.conn.executescript(_SCHEMA)
 
     def add_works(self, records: list[dict]) -> int:
-        """入库新作品。records 按新→旧排列；旧的分配更小的 sort_key。"""
+        """入库新作品。records 按新→旧排列；旧的分配更小的 sort_key。
+
+        前置契约：
+        - records 中的所有作品应为尚未入库的新作品（由上游 collect_new 过滤保证）
+        - 同一作品在批次内重复出现会被安全忽略（第二次 INSERT OR IGNORE 不占号）
+        - 不支持已入库作品与新作品交错的输入（上游 collect_new 保证不产生此类输入）
+
+        返回：
+        - 新增入库的作品数量（重复的作品不计入）
+        """
         row = self.conn.execute("SELECT COALESCE(MAX(sort_key), -1) FROM works").fetchone()
         next_key = row[0] + 1
         inserted = 0
