@@ -41,7 +41,7 @@ async def run_tick(cfg, state, fetcher, uploader, notifier, tmp_dir: Path,
         return
 
     # 阶段二：处理待同步队列（点赞正序）
-    batch = state.next_batch(limit or cfg.sync.batch_size)
+    batch = state.next_batch(limit if limit is not None else cfg.sync.batch_size)
     for work in batch:
         files = []
         try:

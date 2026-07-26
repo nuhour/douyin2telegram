@@ -141,3 +141,12 @@ def test_limit(tmp_path):
     _run(state, FakeFetcher(pages=[[_rec("3"), _rec("2"), _rec("1")]]), uploader,
          tmp_path, limit=2)
     assert uploader.uploaded == ["1", "2"]
+
+
+def test_limit_zero_processes_nothing(tmp_path):
+    state = State(tmp_path / "s.db")
+    uploader = FakeUploader()
+    _run(state, FakeFetcher(pages=[[_rec("3"), _rec("2"), _rec("1")]]), uploader,
+         tmp_path, limit=0)
+    assert uploader.uploaded == []
+    assert len(state.next_batch(10)) == 3  # 队列保持不动，全部仍 pending
