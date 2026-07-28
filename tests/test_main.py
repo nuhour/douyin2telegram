@@ -4,7 +4,7 @@ from pathlib import Path
 from d2t.config import Config, DouyinConfig, SyncConfig, TelegramConfig
 from d2t.models import DouyinAuthError, OversizeError
 from d2t.state import State
-from main import run_tick
+from main import run_backfill, run_tick
 
 
 def _cfg():
@@ -23,10 +23,12 @@ def _rec(aweme_id):
 
 class FakeFetcher:
     def __init__(self, pages=None, fail_fetch=False, fail_detail=False,
-                 fail_detail_ids=None, detail_overrides=None):
+                 fail_detail_ids=None, detail_overrides=None, resumable_pages=None):
         self.pages, self.fail_fetch, self.fail_detail = pages or [], fail_fetch, fail_detail
         self.fail_detail_ids = fail_detail_ids or set()
         self.detail_overrides = detail_overrides or {}
+        self.resumable_pages = resumable_pages or []  # [(next_cursor, has_more, records)]
+        self.start_cursors = []
         self.http_headers = {}
 
     async def resolve_sec_user_id(self):
@@ -37,6 +39,13 @@ class FakeFetcher:
     async def fetch_like_pages(self, sec_user_id):
         for p in self.pages:
             yield p
+
+    async def fetch_like_pages_resumable(self, sec_user_id, start_cursor=0):
+        self.start_cursors.append(start_cursor)
+        for cursor, has_more, records in self.resumable_pages:
+            if start_cursor and cursor >= start_cursor:  # 游标递减；跳过断点前已翻过的页
+                continue
+            yield cursor, has_more, records
 
     async def fetch_detail(self, aweme_id):
         if self.fail_detail or aweme_id in self.fail_detail_ids:
@@ -51,7 +60,7 @@ class FakeUploader:
         self.oversize = oversize
         self.uploaded, self.link_cards, self.messages, self.kinds = [], [], [], []
 
-    async def upload_work(self, work, files, kind):
+    async def upload_work(self, work, files, kind, progress=None):
         if self.oversize:
             raise OversizeError("太大")
         self.uploaded.append(work.aweme_id)
@@ -79,7 +88,7 @@ async def _noop_sleep(_):
     pass
 
 
-async def _fake_download(media, aweme_id, tmp_dir, headers, client=None):
+async def _fake_download(media, aweme_id, tmp_dir, headers, client=None, heartbeat=None, max_bytes=None):
     path = Path(tmp_dir) / f"{aweme_id}.mp4"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(b"x")
@@ -112,6 +121,24 @@ def test_auth_error_sets_cooldown_and_alerts(tmp_path):
     notifier = _run(state, FakeFetcher(fail_fetch=True), FakeUploader(), tmp_path)
     assert state.in_cooldown()
     assert "Cookie" in notifier.alerts[0] or "失败" in notifier.alerts[0]
+
+
+def test_auth_error_while_fetching_detail_alerts_and_does_not_consume_retry(tmp_path):
+    """详情阶段才发现 Cookie 失效时，也应告警并保留作品待处理。"""
+    state = State(tmp_path / "s.db")
+
+    class DetailAuthFailureFetcher(FakeFetcher):
+        async def fetch_detail(self, aweme_id):
+            raise DouyinAuthError("详情接口登录已过期")
+
+    notifier = _run(
+        state, DetailAuthFailureFetcher(pages=[[_rec("1")]]), FakeUploader(), tmp_path
+    )
+    assert state.in_cooldown()
+    pending = state.next_batch(10)
+    assert len(pending) == 1
+    assert pending[0].retries == 0
+    assert "Cookie" in notifier.alerts[0]
 
 
 def test_cooldown_skips_tick(tmp_path):
@@ -173,7 +200,8 @@ def test_images_detail_routes_as_album(tmp_path):
     )
     uploader = FakeUploader()
 
-    async def fake_download_images(media, aweme_id, tmp_dir, headers, client=None):
+    async def fake_download_images(media, aweme_id, tmp_dir, headers, client=None,
+                                   heartbeat=None, max_bytes=None):
         path = Path(tmp_dir) / f"{aweme_id}_0.jpg"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"x")
@@ -192,6 +220,117 @@ def test_alert_failure_during_cooldown_does_not_crash(tmp_path):
     _run(state, FakeFetcher(fail_fetch=True), FakeUploader(), tmp_path, notifier=notifier)
     assert state.in_cooldown()
     assert notifier.alerts  # 确实尝试过发送
+
+
+def test_hung_work_times_out_and_continues(tmp_path, monkeypatch):
+    """网络卡死（如代理断连后 Telethon 永久等待、期间无任何心跳）应被
+    无进展看门狗打断，记为一次失败后继续批次，而不是无限挂起。"""
+    import main as main_mod
+
+    monkeypatch.setattr(main_mod, "STALL_TIMEOUT", 0.05)
+    monkeypatch.setattr(main_mod, "_WATCH_INTERVAL", 0.01)
+
+    async def hanging_download(media, aweme_id, tmp_dir, headers, client=None,
+                               heartbeat=None, max_bytes=None):
+        if aweme_id == "1":
+            await asyncio.sleep(3600)
+        return await _fake_download(media, aweme_id, tmp_dir, headers, client)
+
+    state = State(tmp_path / "s.db")
+    uploader = FakeUploader()
+    _run(state, FakeFetcher(pages=[[_rec("2"), _rec("1")]]), uploader, tmp_path,
+         download_fn=hanging_download)
+    assert uploader.uploaded == ["2"]  # "1" 卡死被打断，"2" 正常继续
+    pending = state.next_batch(10)
+    assert [w.aweme_id for w in pending] == ["1"]
+    assert pending[0].retries == 1  # 记为一次普通失败，等待重试
+
+
+def test_slow_but_progressing_work_not_killed(tmp_path, monkeypatch):
+    """大文件传输总时长可远超看门狗阈值，只要心跳持续就不能被打断。"""
+    import main as main_mod
+
+    monkeypatch.setattr(main_mod, "STALL_TIMEOUT", 0.1)
+    monkeypatch.setattr(main_mod, "_WATCH_INTERVAL", 0.02)
+
+    async def slow_download(media, aweme_id, tmp_dir, headers, client=None,
+                            heartbeat=None, max_bytes=None):
+        for _ in range(10):  # 总耗时 0.3s > STALL_TIMEOUT，但每块都有心跳
+            await asyncio.sleep(0.03)
+            if heartbeat:
+                heartbeat()
+        return await _fake_download(media, aweme_id, tmp_dir, headers, client)
+
+    state = State(tmp_path / "s.db")
+    uploader = FakeUploader()
+    _run(state, FakeFetcher(pages=[[_rec("1")]]), uploader, tmp_path,
+         download_fn=slow_download)
+    assert uploader.uploaded == ["1"]
+    assert state.next_batch(10) == []
+
+
+def _run_backfill(state, fetcher, uploader, tmp_path, limit=None, notifier=None):
+    notifier = notifier or FakeNotifier()
+    asyncio.run(
+        run_backfill(
+            _cfg(), state, fetcher, uploader, notifier,
+            tmp_dir=tmp_path / "tmp", sleep_fn=_noop_sleep,
+            download_fn=_fake_download, limit=limit,
+        )
+    )
+    return notifier
+
+
+def test_backfill_streams_newest_first_and_marks_done(tmp_path):
+    state = State(tmp_path / "s.db")
+    fetcher = FakeFetcher(resumable_pages=[
+        (200, True, [_rec("4"), _rec("3")]),   # 最新页
+        (100, False, [_rec("2"), _rec("1")]),  # 最早页
+    ])
+    uploader = FakeUploader()
+    _run_backfill(state, fetcher, uploader, tmp_path)
+    assert uploader.uploaded == ["4", "3", "2", "1"]  # 边翻边传，新→旧
+    assert state.get_meta("backfill_done") == "1"
+    assert state.next_batch(10) == []
+
+
+def test_backfill_limit_saves_cursor_and_resumes(tmp_path):
+    state = State(tmp_path / "s.db")
+    pages = [
+        (200, True, [_rec("4"), _rec("3")]),
+        (100, False, [_rec("2"), _rec("1")]),
+    ]
+    uploader = FakeUploader()
+    # 第一次只处理 3 条：第 1 页整页 + 第 2 页的 "2"，中断在第 2 页内
+    _run_backfill(state, FakeFetcher(resumable_pages=pages), uploader, tmp_path, limit=3)
+    assert uploader.uploaded == ["4", "3", "2"]
+    assert state.get_meta("backfill_cursor") == "200"  # 只落了已完成页的断点
+    assert state.get_meta("backfill_done") is None
+
+    # 断点重跑：从游标 200 继续，已上传的 "2" 被跳过，仅补 "1"
+    fetcher2 = FakeFetcher(resumable_pages=pages)
+    uploader2 = FakeUploader()
+    _run_backfill(state, fetcher2, uploader2, tmp_path)
+    assert fetcher2.start_cursors == [200]
+    assert uploader2.uploaded == ["1"]
+    assert state.get_meta("backfill_done") == "1"
+
+
+def test_backfill_done_short_circuits(tmp_path):
+    state = State(tmp_path / "s.db")
+    state.set_meta("backfill_done", "1")
+    fetcher = FakeFetcher(resumable_pages=[(100, False, [_rec("1")])])
+    uploader = FakeUploader()
+    _run_backfill(state, fetcher, uploader, tmp_path)
+    assert uploader.uploaded == []
+    assert fetcher.start_cursors == []  # 未发起任何翻页
+
+
+def test_backfill_auth_error_sets_cooldown_and_alerts(tmp_path):
+    state = State(tmp_path / "s.db")
+    notifier = _run_backfill(state, FakeFetcher(fail_fetch=True), FakeUploader(), tmp_path)
+    assert state.in_cooldown()
+    assert notifier.alerts
 
 
 def test_failed_alert_failure_continues_batch(tmp_path):

@@ -22,6 +22,8 @@ class Work:
 class Media:
     kind: str  # "video" | "images"
     urls: list
+    # 图集逐项类型（"image" | "video"），live photo 项为 "video"；None 表示全静图
+    item_kinds: list | None = None
 
 
 class DouyinAuthError(Exception):

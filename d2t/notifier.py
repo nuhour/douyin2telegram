@@ -5,7 +5,7 @@ from d2t.models import Work
 
 def cookie_invalid_text(err: str) -> str:
     return (
-        "🚨 douyin2telegram：拉取喜欢列表失败\n\n"
+        "🚨 douyin2telegram：抖音 Cookie 已失效或过期\n\n"
         f"原因：{err}\n\n"
         "请重新登录 www.douyin.com 复制 Cookie 更新到 config.yaml。\n"
         "已进入冷却，期间不再重试。"

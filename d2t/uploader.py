@@ -1,6 +1,7 @@
 """Telethon 上传：Bot Token 走 MTProto，上传上限 2GB。"""
 
 from pathlib import Path
+from urllib.parse import urlparse
 
 from telethon import TelegramClient
 
@@ -39,15 +40,34 @@ def chunk10(items: list) -> list[list]:
     return [items[i : i + 10] for i in range(0, len(items), 10)]
 
 
+def _parse_proxy(url: str | None) -> dict | None:
+    """把 socks5://host:port 形式的代理串转成 Telethon 的 proxy 参数。"""
+    if not url:
+        return None
+    parsed = urlparse(url)
+    if not parsed.hostname or not parsed.port:
+        raise ValueError(f"telegram.proxy 格式不正确（应形如 socks5://127.0.0.1:7897）: {url}")
+    return {
+        "proxy_type": parsed.scheme or "socks5",
+        "addr": parsed.hostname,
+        "port": parsed.port,
+        **({"username": parsed.username, "password": parsed.password}
+           if parsed.username else {}),
+    }
+
+
 class Uploader:
     def __init__(self, cfg: Config, session_path: Path):
         session_path.parent.mkdir(parents=True, exist_ok=True)
         self.cfg = cfg
         self.client = TelegramClient(
-            str(session_path), cfg.telegram.api_id, cfg.telegram.api_hash
+            str(session_path), cfg.telegram.api_id, cfg.telegram.api_hash,
+            proxy=_parse_proxy(cfg.telegram.proxy),
         )
         self.client.parse_mode = None  # caption 是任意文本，禁用 markdown 解析
         self.client.flood_sleep_threshold = 120
+        # 生效上限取配置与 Telegram 硬上限的较小者；下载阶段也用它提前掐断超限文件
+        self.max_bytes = min(int(cfg.telegram.max_upload_mb * 1024**2), MAX_BYTES)
 
     async def start(self):
         await self.client.start(bot_token=self.cfg.telegram.bot_token)
@@ -60,21 +80,28 @@ class Uploader:
         ch = self.cfg.telegram.channel
         return ch if isinstance(ch, str) and ch.startswith("@") else int(ch)
 
-    async def upload_work(self, work: Work, files: list[Path], kind: str):
+    async def upload_work(self, work: Work, files: list[Path], kind: str, progress=None):
         """kind 必须来自详情页判型（extract_media 的结果），而非入库时列表页的 work.aweme_type——
-        两者可能分叉（例如列表页判为 video，详情页实际是图集），按 kind 分支才能保证不会把图集当视频发送。"""
+        两者可能分叉（例如列表页判为 video，详情页实际是图集），按 kind 分支才能保证不会把图集当视频发送。
+
+        progress: Telethon 每上传一块数据回调一次，供上层的无进展看门狗使用。"""
         total = sum(f.stat().st_size for f in files)
-        if total > MAX_BYTES:
-            raise OversizeError(f"文件共 {total / 1024**3:.2f}GB，超出上传上限")
+        if total > self.max_bytes:
+            raise OversizeError(
+                f"文件共 {total / 1024**2:.1f}MB，超出上传上限 {self.max_bytes / 1024**2:.0f}MB"
+            )
         caption = build_caption(work)
         if kind == "video":
             await self.client.send_file(
-                self.channel, files[0], caption=caption, supports_streaming=True
+                self.channel, files[0], caption=caption, supports_streaming=True,
+                progress_callback=progress,
             )
         else:
             for i, group in enumerate(chunk10(files)):
                 await self.client.send_file(
-                    self.channel, group, caption=caption if i == 0 else None
+                    self.channel, group, caption=caption if i == 0 else None,
+                    supports_streaming=True,  # 图集内的 live photo 视频可流式播放
+                    progress_callback=progress,
                 )
 
     async def send_link_card(self, work: Work, reason: str):

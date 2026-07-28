@@ -27,6 +27,24 @@ def test_batch_order_oldest_first(tmp_path):
     assert st.next_batch(2)[0].aweme_id == "1"  # limit 生效
 
 
+def test_get_pending_work(tmp_path):
+    st = make_state(tmp_path)
+    st.add_works([_rec("1")])
+    assert st.get_pending_work("1").aweme_id == "1"
+    st.mark_uploaded("1")
+    assert st.get_pending_work("1") is None
+    assert st.get_pending_work("99") is None
+
+
+def test_meta_roundtrip(tmp_path):
+    st = make_state(tmp_path)
+    assert st.get_meta("backfill_cursor") is None
+    st.set_meta("backfill_cursor", "1771431739000")
+    assert st.get_meta("backfill_cursor") == "1771431739000"
+    st.set_meta("backfill_cursor", "0")
+    assert st.get_meta("backfill_cursor") == "0"
+
+
 def test_status_transitions(tmp_path):
     st = make_state(tmp_path)
     st.add_works([_rec("1")])

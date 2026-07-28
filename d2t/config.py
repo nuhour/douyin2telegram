@@ -23,6 +23,8 @@ class TelegramConfig:
     bot_token: str
     channel: str | int
     alert_chat_id: int
+    proxy: str | None = None  # 形如 socks5://127.0.0.1:7897，直连可用时留空
+    max_upload_mb: float = 1900  # 单作品媒体总大小上限（MB），超过跳过上传、降级为链接卡片
 
 
 @dataclass
@@ -62,6 +64,8 @@ def load_config(path: Path) -> Config:
         bot_token=_require(data, "telegram", "bot_token"),
         channel=_require(data, "telegram", "channel"),
         alert_chat_id=int(_require(data, "telegram", "alert_chat_id")),
+        proxy=(data.get("telegram") or {}).get("proxy") or None,
+        max_upload_mb=float((data.get("telegram") or {}).get("max_upload_mb") or 1900),
     )
     sync = SyncConfig(**(data.get("sync") or {}))
     return Config(douyin=douyin, telegram=telegram, sync=sync)

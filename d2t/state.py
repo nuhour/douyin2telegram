@@ -73,6 +73,27 @@ class State:
         ).fetchall()
         return [Work(*row) for row in rows]
 
+    def get_pending_work(self, aweme_id: str) -> Work | None:
+        """按 id 取仍待处理的作品；已上传/跳过/失败的返回 None（回填模式跳过用）。"""
+        row = self.conn.execute(
+            "SELECT aweme_id, aweme_type, title, author, status, retries FROM works"
+            " WHERE aweme_id = ? AND status = 'pending'",
+            (aweme_id,),
+        ).fetchone()
+        return Work(*row) if row else None
+
+    def get_meta(self, key: str) -> str | None:
+        row = self.conn.execute(
+            "SELECT value FROM meta WHERE key = ?", (key,)
+        ).fetchone()
+        return row[0] if row else None
+
+    def set_meta(self, key: str, value: str):
+        self.conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, value)
+        )
+        self.conn.commit()
+
     def _set(self, aweme_id: str, status: str, error: str | None = None):
         self.conn.execute(
             "UPDATE works SET status = ?, error = ?, updated_at = ? WHERE aweme_id = ?",

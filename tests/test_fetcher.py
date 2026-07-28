@@ -60,10 +60,14 @@ class FakeFilter:
         return self.records
 
 
+class AuthExpiredFilter(FakeFilter):
+    status_code = 8
+
+
 async def _fake_fetch_user_like_videos(*yields):
     """生成一系列假 filter 对象."""
     for records in yields:
-        yield FakeFilter(records)
+        yield records if hasattr(records, "_to_list") else FakeFilter(records)
 
 
 def test_fetch_like_pages_skips_transient_empty_page():
@@ -104,6 +108,23 @@ def test_fetch_like_pages_first_page_empty_raises():
         )
 
         with pytest.raises(DouyinAuthError, match="喜欢列表首页为空"):
+            async for _ in fetcher.fetch_like_pages("sec_user_id"):
+                pass
+
+    asyncio.run(run_test())
+
+
+def test_fetch_like_pages_login_expired_response_raises():
+    """F2 返回 status_code=8 时，即使结构可解析，也必须识别为 Cookie 失效。"""
+    async def run_test():
+        from unittest.mock import MagicMock
+        fetcher = DouyinFetcher(MagicMock(douyin=MagicMock(profile_url="", cookie="")))
+        fetcher.handler = MagicMock()
+        fetcher.handler.fetch_user_like_videos = MagicMock(
+            return_value=_fake_fetch_user_like_videos(AuthExpiredFilter([_rec("1")]))
+        )
+
+        with pytest.raises(DouyinAuthError, match="登录已过期"):
             async for _ in fetcher.fetch_like_pages("sec_user_id"):
                 pass
 

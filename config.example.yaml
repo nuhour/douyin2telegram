@@ -14,6 +14,10 @@ telegram:
   channel: "@your_channel"
   # 你自己的用户 chat_id（先给 Bot 发一次 /start；可用 @userinfobot 查询自己的 ID）
   alert_chat_id: 123456789
+  # 可选：Telegram 连接代理（直连可用时删除或留空），形如 socks5://127.0.0.1:7897
+  # proxy: "socks5://127.0.0.1:7897"
+  # 可选：单作品媒体总大小上限（MB，默认 1900）。超过跳过上传，发链接卡片代替
+  # max_upload_mb: 10
 
 sync:
   batch_size: 20        # 单次 tick 最多处理条数
